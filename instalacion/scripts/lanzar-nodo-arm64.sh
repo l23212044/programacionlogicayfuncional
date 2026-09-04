@@ -40,36 +40,32 @@ need() {
 }
 
 # autorizar una regla de ingress solo si no existe ya (idempotente y auditable).
-# describe-security-group-rules solo admite el filtro group-id; el resto del
-# emparejamiento (protocolo, puertos, origen) se hace en el --query JMESPath.
+# NO usamos `aws ec2 describe-security-group-rules`: el AWS CLI de la CloudShell
+# del Learner Lab es viejo y no conoce esa operación ("Invalid choice:
+# 'describe-security-group-rules'"). En su lugar intentamos crear la regla e
+# interpretamos el error InvalidPermission.Duplicate como "ya existía".
 autorizar_ingress() {
   local sg="$1" proto="$2" desde="$3" hasta="$4" origen="$5" desc="$6"
-  local cond_origen
-  if [[ "$origen" == sg-* ]]; then
-    cond_origen="ReferencedGroupInfo.GroupId=='$origen'"
-  else
-    cond_origen="CidrIpv4=='$origen'"
-  fi
-  local existe
-  existe=$(aws ec2 describe-security-group-rules \
-    --filters "Name=group-id,Values=$sg" \
-    --query "SecurityGroupRules[?IsEgress==\`false\` && IpProtocol=='$proto' && FromPort==\`$desde\` && ToPort==\`$hasta\` && $cond_origen].SecurityGroupRuleId" \
-    --output text)
-  if [ -n "$existe" ]; then
-    echo "   ✅ ya existe  $proto $desde-$hasta  <- $origen"
-    return 0
-  fi
-  local origen_flag
+  local origen_flag puerto
   if [[ "$origen" == sg-* ]]; then
     origen_flag=(--source-group "$origen")
   else
     origen_flag=(--cidr "$origen")
   fi
-  aws ec2 authorize-security-group-ingress \
-    --group-id "$sg" --protocol "$proto" \
-    --port "$( [ "$desde" = "$hasta" ] && echo "$desde" || echo "$desde-$hasta" )" \
-    "${origen_flag[@]}" >/dev/null
-  echo "   ➕ agregada    $proto $desde-$hasta  <- $origen   ($desc)"
+  puerto="$( [ "$desde" = "$hasta" ] && echo "$desde" || echo "$desde-$hasta" )"
+
+  local out
+  if out=$(aws ec2 authorize-security-group-ingress \
+            --group-id "$sg" --protocol "$proto" --port "$puerto" \
+            "${origen_flag[@]}" 2>&1); then
+    echo "   ➕ agregada    $proto $desde-$hasta  <- $origen   ($desc)"
+  elif echo "$out" | grep -q "InvalidPermission.Duplicate"; then
+    echo "   ✅ ya existe  $proto $desde-$hasta  <- $origen"
+  else
+    echo "   ❌ error autorizando $proto $desde-$hasta <- $origen" >&2
+    echo "$out" >&2
+    return 1
+  fi
 }
 
 clear
